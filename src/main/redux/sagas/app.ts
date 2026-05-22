@@ -33,6 +33,8 @@ import { availableLanguages } from "readium-desktop/common/services/translator";
 import { i18nActions } from "readium-desktop/common/redux/actions";
 import { URL_PROTOCOL_APP_HANDLER_OPDS, URL_PROTOCOL_APP_HANDLER_THORIUM } from "readium-desktop/common/streamerProtocol";
 import { PersistRootState, RootState } from "../states";
+import { irohNodeManager } from "readium-desktop/main/iroh";
+import path from "path";
 
 // Logger
 const filename_ = "readium-desktop:main:saga:app";
@@ -167,6 +169,11 @@ export function* init() {
     });
 
     yield call(() => {
+        const irohDataDir = path.join(app.getPath("userData"), "iroh");
+        return irohNodeManager.start(irohDataDir);
+    });
+
+    yield call(() => {
         const deviceIdManager = diMainGet("device-id-manager");
         return deviceIdManager.absorbDBToJson();
     });
@@ -243,6 +250,15 @@ function* closeProcess() {
                         debug("Success to clearSessions");
                     } catch (e) {
                         debug("ERROR to clearSessions", e);
+                    }
+                }),
+                call(function*() {
+
+                    try {
+                        yield call(() => irohNodeManager.stop());
+                        debug("Success to stop IROH node");
+                    } catch (e) {
+                        debug("ERROR to stop IROH node", e);
                     }
                 }),
                 call(function*() {

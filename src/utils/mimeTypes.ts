@@ -1179,6 +1179,7 @@ export const mimeTypes = {
     [ADOBE_ADEPT_XML]: "application/vnd.adobe.adept+xml",
     "annotation": "application/rd-annotations+json", // also see acceptedExtensionObject.annotations EXT_ANNOTATIONS
     "thorium": "application/vnd.edrlab.thorium+zip", // also see acceptedExtensionObject.customizationProfilePackage EXT_THORIUM
+    "iroh": "application/iroh-blob",
 };
 
 export const findMimeTypeWithExtension = (ext: string): string | undefined => {
