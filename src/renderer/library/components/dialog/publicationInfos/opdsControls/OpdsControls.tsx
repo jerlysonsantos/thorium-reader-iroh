@@ -88,203 +88,203 @@ export class OpdsControls extends React.Component<IProps, undefined> {
                 : (ln.type ? ` (${adjustDisplayType(findExtWithMimeType(ln.type)) || adjustDisplayType(findExtWithMimeType(ln.type.replace("+json", "+zip")))})` : "");
         };
 
-        const openAccessLinksButton = () =>
-            Array.isArray(opdsPublicationView.openAccessLinks)
-                ? orderLinks(opdsPublicationView.openAccessLinks).map(
-                    (ln, idx) =>
-                        <div key={`openAccessControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
-                            <button
-                                onClick={() => {
-
-                                    if (ln.type === ContentType.Html || ln.type === ContentType.Xhtml) {
-                                        this.props.link(
-                                            ln,
-                                            this.props.location,
-                                        );
-                                    } else {
-
-                                        verifyImport(
-                                            ln,
-                                            opdsPublicationView,
-                                        );
-                                    }
-                                }}
-                                className={feedLinksList.length > 0 ? stylesButtons.button_secondary : stylesButtons.button_primary}
-                                disabled={openAccessButtonIsDisabled(ln.url)}
-                                title={ln.title || __("catalog.addBookToLib")}
-                            >
-                                {`${__("catalog.addBookToLib")}${typeStr(ln)}`}
-                            </button>
-                            {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>} 
-                            <OpdsLinkProperties
-                                properties={ln.properties}
-                            />
-                        </div>,
-                )
-                : <></>;
-
-        const sampleOrPreviewLinksButton = () =>
-            Array.isArray(opdsPublicationView.sampleOrPreviewLinks)
-                ? orderLinks(opdsPublicationView.sampleOrPreviewLinks).map(
-                    (ln, idx) =>
-                        <div key={`sampleControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
-                            <button
-                                onClick={() => {
-
-                                    if (ln.type === ContentType.Html || ln.type === ContentType.Xhtml) {
-                                        this.props.link(
-                                            ln,
-                                            this.props.location,
-                                        );
-                                    } else {
-
-                                        verifyImport(
-                                            ln,
-                                            opdsPublicationView,
-                                        );
-                                    }
-                                }}
-                                className={stylesButtons.button_secondary}
-                                disabled={sampleButtonIsDisabled(ln.url)}
-                                title={ln.title || __("opds.menu.addExtract")}
-                            >
-                                <SVG ariaHidden={true} svg={ImportIcon} />
-                                {`${__("opds.menu.addExtract")}${typeStr(ln)}`}
-                            </button>
-                            {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>} 
-                            <OpdsLinkProperties
-                                properties={ln.properties}
-                            />
-                        </div>,
-                )
-                : <></>;
-
-        const feedLinksList = () => {
-
-            const buyList = () =>
-                Array.isArray(opdsPublicationView.buyLinks)
-                    ? orderLinks(opdsPublicationView.buyLinks).map(
+            const openAccessLinksButton = () =>
+                Array.isArray(opdsPublicationView.openAccessLinks)
+                    ? orderLinks(opdsPublicationView.openAccessLinks).map(
                         (ln, idx) =>
-                            <div key={`buyControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+                            <div key={`openAccessControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
                                 <button
-                                    className={classNames(stylesButtons.button_primary, stylesGlobal.mb_20)}
-                                    onClick={
-                                        () => this.props.link(
-                                            ln,
-                                            this.props.location,
-                                            `${__("opds.menu.goBuyBook")} (${opdsPublicationView.documentTitle}))`,
-                                        )
-                                    }
+                                    onClick={() => {
 
+                                        if (ln.type === ContentType.Html || ln.type === ContentType.Xhtml) {
+                                            this.props.link(
+                                                ln,
+                                                this.props.location,
+                                            );
+                                        } else {
+
+                                            verifyImport(
+                                                ln,
+                                                opdsPublicationView,
+                                            );
+                                        }
+                                    }}
+                                    className={feedLinksList.length > 0 ? stylesButtons.button_secondary : stylesButtons.button_primary}
+                                    disabled={openAccessButtonIsDisabled(ln.url)}
+                                    title={ln.title || __("catalog.addBookToLib")}
                                 >
-                                    <SVG ariaHidden={true} svg={CartFillIcon} />
-                                    {__("opds.menu.goBuyBook")}
+                                    {`${__("catalog.addBookToLib")}${typeStr(ln)}`}
                                 </button>
-                                {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>} 
-                                <OpdsLinkProperties properties={ln.properties} />
+                                {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>}
+                                <OpdsLinkProperties
+                                    properties={ln.properties}
+                                />
                             </div>,
                     )
                     : <></>;
 
-            const borrowList = () =>
-                Array.isArray(opdsPublicationView.borrowLinks)
-                    ? orderLinks(opdsPublicationView.borrowLinks).map(
+            const sampleOrPreviewLinksButton = () =>
+                Array.isArray(opdsPublicationView.sampleOrPreviewLinks)
+                    ? orderLinks(opdsPublicationView.sampleOrPreviewLinks).map(
                         (ln, idx) =>
-                            <div key={`borrowControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+                            <div key={`sampleControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
                                 <button
-                                    className={buyList.length > 0 ? stylesButtons.button_secondary : stylesButtons.button_primary}
-                                    onClick={() => this.props.link(
-                                        ln,
-                                        this.props.location,
-                                        `${__("opds.menu.goLoanBook")} (${opdsPublicationView.documentTitle})`)}
-                                    disabled={ln.properties?.indirectAcquisitionTypes?.top === findMimeTypeWithExtension(ADOBE_ADEPT_XML)}
+                                    onClick={() => {
+
+                                        if (ln.type === ContentType.Html || ln.type === ContentType.Xhtml) {
+                                            this.props.link(
+                                                ln,
+                                                this.props.location,
+                                            );
+                                        } else {
+
+                                            verifyImport(
+                                                ln,
+                                                opdsPublicationView,
+                                            );
+                                        }
+                                    }}
+                                    className={stylesButtons.button_secondary}
+                                    disabled={sampleButtonIsDisabled(ln.url)}
+                                    title={ln.title || __("opds.menu.addExtract")}
                                 >
-                                    <SVG ariaHidden svg={BorrowIcon} />
-                                    {__("opds.menu.goLoanBook")}
+                                    <SVG ariaHidden={true} svg={ImportIcon} />
+                                    {`${__("opds.menu.addExtract")}${typeStr(ln)}`}
                                 </button>
-                                {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>} 
-                                <OpdsLinkProperties properties={ln.properties} />
+                                {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>}
+                                <OpdsLinkProperties
+                                    properties={ln.properties}
+                                />
                             </div>,
                     )
                     : <></>;
 
-            const subscribeList = () =>
-                Array.isArray(opdsPublicationView.subscribeLinks)
-                    ? orderLinks(opdsPublicationView.subscribeLinks).map(
-                        (ln, idx) =>
-                            <div key={`subscribeControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+            const feedLinksList = () => {
+
+                const buyList = () =>
+                    Array.isArray(opdsPublicationView.buyLinks)
+                        ? orderLinks(opdsPublicationView.buyLinks).map(
+                            (ln, idx) =>
+                                <div key={`buyControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+                                    <button
+                                        className={classNames(stylesButtons.button_primary, stylesGlobal.mb_20)}
+                                        onClick={
+                                            () => this.props.link(
+                                                ln,
+                                                this.props.location,
+                                                `${__("opds.menu.goBuyBook")} (${opdsPublicationView.documentTitle}))`,
+                                            )
+                                        }
+
+                                    >
+                                        <SVG ariaHidden={true} svg={CartFillIcon} />
+                                        {__("opds.menu.goBuyBook")}
+                                    </button>
+                                    {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>}
+                                    <OpdsLinkProperties properties={ln.properties} />
+                                </div>,
+                        )
+                        : <></>;
+
+                const borrowList = () =>
+                    Array.isArray(opdsPublicationView.borrowLinks)
+                        ? orderLinks(opdsPublicationView.borrowLinks).map(
+                            (ln, idx) =>
+                                <div key={`borrowControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+                                    <button
+                                        className={buyList.length > 0 ? stylesButtons.button_secondary : stylesButtons.button_primary}
+                                        onClick={() => this.props.link(
+                                            ln,
+                                            this.props.location,
+                                            `${__("opds.menu.goLoanBook")} (${opdsPublicationView.documentTitle})`)}
+                                        disabled={ln.properties?.indirectAcquisitionTypes?.top === findMimeTypeWithExtension(ADOBE_ADEPT_XML)}
+                                    >
+                                        <SVG ariaHidden svg={BorrowIcon} />
+                                        {__("opds.menu.goLoanBook")}
+                                    </button>
+                                    {ln.localBookshelfPublicationId ? <button className={stylesButtons.button_secondary} onClick={() => this.props.read(ln.localBookshelfPublicationId)}>{__("catalog.readBook")}</button> : <></>}
+                                    <OpdsLinkProperties properties={ln.properties} />
+                                </div>,
+                        )
+                        : <></>;
+
+                const subscribeList = () =>
+                    Array.isArray(opdsPublicationView.subscribeLinks)
+                        ? orderLinks(opdsPublicationView.subscribeLinks).map(
+                            (ln, idx) =>
+                                <div key={`subscribeControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
+                                    <button
+                                        className={stylesButtons.button_secondary}
+                                        onClick={() => this.props.link(
+                                            ln,
+                                            this.props.location,
+                                            `${__("opds.menu.goSubBook")} (${opdsPublicationView.documentTitle})`)}
+                                    >
+                                        {__("opds.menu.goSubBook")}
+                                    </button>
+                                    <OpdsLinkProperties properties={ln.properties} />
+                                </div>,
+                        )
+                        : <></>;
+
+                const revokeLoanList = () =>
+                    Array.isArray(opdsPublicationView.revokeLoanLinks) ? (
+                        orderLinks(opdsPublicationView.revokeLoanLinks).map((ln, idx) => (
+                            <div key={`revokeControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
                                 <button
                                     className={stylesButtons.button_secondary}
-                                    onClick={() => this.props.link(
-                                        ln,
-                                        this.props.location,
-                                        `${__("opds.menu.goSubBook")} (${opdsPublicationView.documentTitle})`)}
+                                    onClick={() =>
+                                        this.props.link(
+                                            ln,
+                                            this.props.location,
+                                            `${__("opds.menu.goRevokeLoanBook")} (${opdsPublicationView.documentTitle
+                                            })`,
+                                        )
+                                    }
                                 >
-                                    {__("opds.menu.goSubBook")}
+                                    {__("opds.menu.goRevokeLoanBook")}
                                 </button>
                                 <OpdsLinkProperties properties={ln.properties} />
-                            </div>,
-                    )
-                    : <></>;
+                            </div>
+                        ))
+                    ) : (
+                        <></>
+                    );
 
-            const revokeLoanList = () =>
-                Array.isArray(opdsPublicationView.revokeLoanLinks) ? (
-                    orderLinks(opdsPublicationView.revokeLoanLinks).map((ln, idx) => (
-                        <div key={`revokeControl-${idx}`} style={ln.properties && Object.keys(ln.properties).length ? boxStyle : {}}>
-                            <button
-                                className={stylesButtons.button_secondary}
-                                onClick={() =>
-                                    this.props.link(
-                                        ln,
-                                        this.props.location,
-                                        `${__("opds.menu.goRevokeLoanBook")} (${opdsPublicationView.documentTitle
-                                        })`,
-                                    )
-                                }
-                            >
-                                {__("opds.menu.goRevokeLoanBook")}
-                            </button>
-                            <OpdsLinkProperties properties={ln.properties} />
+                if (
+                    (Array.isArray(opdsPublicationView.buyLinks)
+                        && opdsPublicationView.buyLinks.length)
+                    || (Array.isArray(opdsPublicationView.borrowLinks)
+                        && opdsPublicationView.borrowLinks.length)
+                    || (Array.isArray(opdsPublicationView.subscribeLinks)
+                        && opdsPublicationView.subscribeLinks.length)
+                    || (Array.isArray(opdsPublicationView.revokeLoanLinks)
+                        && opdsPublicationView.revokeLoanLinks.length)
+                ) {
+                    return (
+                        <div>
+                            {
+                                buyList()
+                            }
+                            {
+                                borrowList()
+                            }
+                            {
+                                subscribeList()
+                            }
+                            {
+                                revokeLoanList()
+                            }
                         </div>
-                    ))
-                ) : (
-                    <></>
-                );
+                    );
+                }
+                return (<></>);
+            };
 
-            if (
-                (Array.isArray(opdsPublicationView.buyLinks)
-                    && opdsPublicationView.buyLinks.length)
-                || (Array.isArray(opdsPublicationView.borrowLinks)
-                    && opdsPublicationView.borrowLinks.length)
-                || (Array.isArray(opdsPublicationView.subscribeLinks)
-                    && opdsPublicationView.subscribeLinks.length)
-                || (Array.isArray(opdsPublicationView.revokeLoanLinks)
-                    && opdsPublicationView.revokeLoanLinks.length)
-            ) {
-                return (
-                    <div>
-                        {
-                            buyList()
-                        }
-                        {
-                            borrowList()
-                        }
-                        {
-                            subscribeList()
-                        }
-                        {
-                            revokeLoanList()
-                        }
-                    </div>
-                );
-            }
-            return (<></>);
-        };
-
-        return (
-            <>
-                {
-                    openAccessLinksButton()
+            return (
+                <>
+                    {
+                        openAccessLinksButton()
                 }
                 {
                     sampleOrPreviewLinksButton()

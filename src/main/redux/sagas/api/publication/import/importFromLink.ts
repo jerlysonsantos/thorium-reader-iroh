@@ -42,6 +42,67 @@ import { URL_PATH_PREFIX_CUSTOMPROFILEZIP } from "readium-desktop/common/streame
 // Logger
 const debug = debug_("readium-desktop:main#saga/api/publication/importFromLinkService");
 
+// Detects the file extension from the first bytes of a downloaded file.
+// Needed because IROH blobs carry no MIME type metadata in the ticket itself.
+async function detectExtFromMagicBytes(filePath: string): Promise<string> {
+    const buf = Buffer.alloc(8);
+    const handle = await fs.promises.open(filePath, "r");
+    try {
+        await handle.read(buf, 0, 8, 0);
+    } finally {
+        await handle.close();
+    }
+    // %PDF
+    if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return ".pdf";
+    // PK (ZIP → EPUB, audiobook, divina …)
+    if (buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04) return ".epub";
+    // JSON opening brace → LCP license or webpub manifest
+    if (buf[0] === 0x7B) return ".lcpl";
+    return ".epub";
+}
+
+// Sanitizes a string so it can be used safely as a file name.
+function sanitizeFilename(name: string): string {
+    return name.replace(/[/\\:*?"<>|]/g, "_").trim().slice(0, 200) || "download";
+}
+
+// Downloads a blob from the IROH P2P network using a BlobTicket string.
+// Returns the local temp-file path after the download is complete.
+function* downloadFromIrohTicket(ticketStr: string, title: string): SagaGenerator<string> {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Iroh, BlobTicket, BlobDownloadOptions, SetTagOption } = require("@number0/iroh");
+
+    debug("IROH: parsing ticket");
+    const ticket = BlobTicket.fromString(ticketStr);
+
+    debug("IROH: starting in-memory node");
+    const node = yield* callTyped(() => Iroh.memory() as Promise<{ blobs: { download: Function; writeToPath: Function }; node: { shutdown: Function } }>);
+
+    try {
+        const opts = new BlobDownloadOptions(ticket.format, [ticket.nodeAddr], SetTagOption.auto());
+
+        debug("IROH: downloading from peer", ticket.nodeAddr.nodeId);
+        yield* callTyped(() => new Promise<void>((resolve, reject) => {
+            node.blobs.download(ticket.hash, opts, (err: Error | null, event: { allDone?: unknown }) => {
+                if (err) return reject(err);
+                if (event?.allDone != null) resolve();
+            });
+        }));
+
+        const tmpPath = path.join(app.getPath("temp"), `${nanoid(5)}.tmp`);
+        yield* callTyped(() => node.blobs.writeToPath(ticket.hash, tmpPath) as Promise<void>);
+
+        const ext = yield* callTyped(() => detectExtFromMagicBytes(tmpPath));
+        const downloadPath = path.join(app.getPath("temp"), `${sanitizeFilename(title)}${ext}`);
+        yield* callTyped(() => fs.promises.rename(tmpPath, downloadPath));
+
+        debug("IROH: blob saved to", downloadPath);
+        return downloadPath;
+    } finally {
+        yield* callTyped(() => node.node.shutdown() as Promise<void>);
+    }
+}
+
 function* importLinkFromPath(
     downloadPath: string,
     willBeImmediatelyFollowedByOpen: boolean,
@@ -147,6 +208,19 @@ export function* importFromLinkService(
     willBeImmediatelyFollowedByOpen: boolean,
     pub?: IOpdsPublicationView,
 ): SagaGenerator<[publicationDocument: PublicationDocument | undefined, alreadyImported: boolean]> {
+
+    // An IROH BlobTicket (e.g. "blobaa1q…") is not a valid HTTP URL.
+    // Handle it before the URL-parsing step to avoid a throw.
+    if ((link.type || "").replace(/\s/g, "").split(";").includes(ContentType.IrohBlob)) {
+        debug("IROH blob detected, ticket:", link.url);
+        const irohTitle = pub?.documentTitle || link.title || "download";
+        const irohPath = yield* callTyped(downloadFromIrohTicket, link.url, irohTitle);
+        if (irohPath) {
+            return yield* callTyped(importLinkFromPath, irohPath, willBeImmediatelyFollowedByOpen, link, pub);
+        }
+        debug("IROH blob download returned empty path");
+        return [undefined, false];
+    }
 
     let url: URL;
     try {

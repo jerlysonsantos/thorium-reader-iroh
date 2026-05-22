@@ -37,6 +37,7 @@ export enum ContentType {
     problemDetails = "application/problem+json", // https://datatracker.ietf.org/doc/html/rfc7807#section-6.1
     ApiProblem = "application/api-problem+json",
     Zip = "application/zip", // Daisy Zipped file
+    IrohBlob = "application/iroh-blob",
 
     Opf = "application/oebps-package+xml",
 }
@@ -85,4 +86,3 @@ export const contentTypeisLsd = (contentType: ContentType | undefined) =>
 export const contentTypeisLcp = (contentType: ContentType | undefined) =>
     contentType === ContentType.Lcp ||
     contentType === ContentType.Json;
-    

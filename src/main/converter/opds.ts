@@ -77,6 +77,8 @@ const supportedFileTypeLinks = [
 
     ContentType.Html, // https://github.com/edrlab/thorium-reader/issues/2208
     ContentType.Xhtml,
+
+    ContentType.IrohBlob,
 ];
 
 const supportedFileTypeLinksForPayWallAcquisition = [
@@ -308,8 +310,10 @@ export class OpdsFeedViewConverter {
         baseUrl: string,
     ): IOpdsLinkView {
 
-        // transform to absolute url
-        ln.Href = urlPathResolve(baseUrl, ln.Href);
+        // transform to absolute url (skip for IROH tickets — they are not URLs)
+        if (ln.TypeLink !== ContentType.IrohBlob) {
+            ln.Href = urlPathResolve(baseUrl, ln.Href);
+        }
         // safe copy on each filtered links
         return {
             url: ln.Href,
