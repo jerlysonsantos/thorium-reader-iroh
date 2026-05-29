@@ -23,7 +23,11 @@ import { PublicationDocument } from "readium-desktop/main/db/document/publicatio
 import { diMainGet } from "readium-desktop/main/di";
 import { ContentType, parseContentType } from "readium-desktop/utils/contentType";
 import { SagaGenerator } from "typed-redux-saga";
-import { delay as delayTyped, call as callTyped, race as raceTyped } from "typed-redux-saga/macro";
+import { delay as delayTyped, call as callTyped, put as putTyped, race as raceTyped, fork as forkTyped, take as takeTyped } from "typed-redux-saga/macro";
+import { downloadActions } from "readium-desktop/common/redux/actions";
+import { Channel, channel } from "@redux-saga/core";
+// eslint-disable-next-line local-rules/typed-redux-saga-use-typed-effects
+import { cancel } from "redux-saga/effects";
 
 import { downloader } from "../../../downloader";
 import { packageFromLink } from "../packager/packageLink";
@@ -53,10 +57,20 @@ function* importLinkFromPath(
     // Import downloaded publication in catalog
     const lcpHashedPassphrase = link?.properties?.lcpHashedPassphrase;
 
-    const { b: [publicationDocument, alreadyImported] } = yield* raceTyped({
-        a: delayTyped(30000),
+    // PDF packaging (pdfPackager) opens a BrowserWindow internally; on Windows
+    // this can be significantly slower than on other platforms.
+    const IMPORT_TIMEOUT_MS = process.platform === "win32" ? 120_000 : 30_000;
+
+    const raceResult = yield* raceTyped({
+        a: delayTyped(IMPORT_TIMEOUT_MS),
         b: callTyped(importFromFsService, downloadPath, willBeImmediatelyFollowedByOpen, lcpHashedPassphrase),
     });
+
+    if (!raceResult.b) {
+        throw new Error(`importFromFsService timed out after ${IMPORT_TIMEOUT_MS / 1000}s for: ${downloadPath}`);
+    }
+
+    const [publicationDocument, alreadyImported] = raceResult.b;
 
     if (link.localBookshelfPublicationId) {
 
@@ -154,8 +168,41 @@ export function* importFromLinkService(
     if ((link.type || "").replace(/\s/g, "").split(";").includes(ContentType.IrohBlob)) {
         debug("IROH blob detected, ticket:", link.url);
         const irohTitle = pub?.documentTitle || link.title || "download";
+        const downloadId = Number(new Date());
 
-        const irohPath = yield* callTyped(() => downloadBlobFromTicket(link.url, irohTitle));
+        // Bridge: downloadBlobFromTicket calls onProgress(pct, size) → channel.put → forked
+        // saga task reads and dispatches downloadActions.progress to update the UI bar.
+        const progressChan: Channel<{ pct: number; size: string }> = channel();
+        const progressTask = yield* forkTyped(function*() {
+            while (true) {
+                const item = yield* takeTyped(progressChan);
+                yield* putTyped(downloadActions.progress.build({
+                    downloadLabel: irohTitle,
+                    downloadUrls: [link.url],
+                    progress: item.pct,
+                    id: downloadId,
+                    speed: 0,
+                    contentLengthHumanReadable: item.size,
+                }));
+            }
+        });
+
+        let irohPath: string;
+        try {
+            irohPath = yield* callTyped(() =>
+                downloadBlobFromTicket(link.url, irohTitle, (pct, size) => progressChan.put({ pct, size })),
+            );
+        } catch (e) {
+            debug("IROH blob download failed", e);
+            yield cancel(progressTask);
+            progressChan.close();
+            yield* putTyped(downloadActions.done.build(downloadId));
+            return [undefined, false];
+        }
+        yield cancel(progressTask);
+        progressChan.close();
+        yield* putTyped(downloadActions.done.build(downloadId));
+
         if (!irohPath) {
             debug("IROH blob download returned empty path");
             return [undefined, false];

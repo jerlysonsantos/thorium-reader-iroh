@@ -7,6 +7,7 @@
 
 import debug_ from "debug";
 import * as fs from "fs";
+import { Iroh, Gossip, Net } from "@number0/iroh";
 
 const debug = debug_("readium-desktop:main:iroh:node");
 
@@ -16,6 +17,8 @@ interface IrohInstance {
         addFromPath: Function;
         share: Function;
     };
+    gossip: Gossip;
+    net: Net;
     node: {
         shutdown: () => Promise<void>;
     };
@@ -35,7 +38,6 @@ class IrohNodeManager {
         }
         try {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const { Iroh } = require("@number0/iroh");
             await fs.promises.mkdir(dataDir, { recursive: true });
             this.instance = await Iroh.persistent(dataDir) as IrohInstance;
             debug("IROH persistent node started at", dataDir);

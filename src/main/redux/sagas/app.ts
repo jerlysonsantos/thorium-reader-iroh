@@ -33,7 +33,7 @@ import { availableLanguages } from "readium-desktop/common/services/translator";
 import { i18nActions } from "readium-desktop/common/redux/actions";
 import { URL_PROTOCOL_APP_HANDLER_OPDS, URL_PROTOCOL_APP_HANDLER_THORIUM } from "readium-desktop/common/streamerProtocol";
 import { PersistRootState, RootState } from "../states";
-import { irohNodeManager } from "readium-desktop/main/iroh";
+import { irohNodeManager, gossipManager } from "readium-desktop/main/iroh";
 import path from "path";
 
 // Logger
@@ -253,6 +253,14 @@ function* closeProcess() {
                     }
                 }),
                 call(function*() {
+
+                    try {
+                        // Stop gossip subscriptions before shutting down the node.
+                        yield call(() => gossipManager.stopAll());
+                        debug("Success to stop gossip manager");
+                    } catch (e) {
+                        debug("ERROR to stop gossip manager", e);
+                    }
 
                     try {
                         yield call(() => irohNodeManager.stop());

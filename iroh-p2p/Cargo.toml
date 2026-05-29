@@ -1,0 +1,15 @@
+[package]
+name = "thorium-iroh-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "thorium-iroh-p2p"
+path = "src/main.rs"
+
+[dependencies]
+iroh = "0.35"
+iroh-blobs = { version = "0.35", features = ["fs-store"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

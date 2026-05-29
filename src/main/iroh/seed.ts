@@ -7,6 +7,8 @@
 
 import debug_ from "debug";
 import { irohNodeManager } from "./node";
+import { gossipManager } from "./gossip";
+import { SetTagOption } from "@number0/iroh";
 
 const debug = debug_("readium-desktop:main:iroh:seed");
 
@@ -18,9 +20,6 @@ export async function seedLocalFile(filePath: string): Promise<string | null> {
         debug("IROH node not running, skipping seed for", filePath);
         return null;
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { SetTagOption } = require("@number0/iroh");
 
     const node = irohNodeManager.getInstance();
 
@@ -45,9 +44,14 @@ export async function seedLocalFile(filePath: string): Promise<string | null> {
         const ticketStr = ticket.toString();
 
         debug("seeding", filePath, "ticket:", ticketStr);
+
+        // Announce to the gossip swarm that we hold this blob so that
+        // other peers can discover us even if they only know the hash.
+        gossipManager.announceBlob(allDone.hash).catch((e) =>
+            debug("gossip announce failed for", allDone.hash, e));
+
         return ticketStr;
     } catch (e) {
-        // Non-fatal: seeding is best-effort.
         debug("seed failed for", filePath, e);
         return null;
     }

@@ -8,3 +8,4 @@
 export { irohNodeManager } from "./node";
 export { downloadBlobFromTicket } from "./download";
 export { seedLocalFile } from "./seed";
+export { gossipManager } from "./gossip";
