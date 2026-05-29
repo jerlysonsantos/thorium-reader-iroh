@@ -6,7 +6,7 @@
 // ==LICENSE-END==
 
 import debug_ from "debug";
-import { Hash, Message, Sender } from "@number0/iroh";
+import { Hash, Message, PublicKey, Sender } from "@number0/iroh";
 import { irohNodeManager } from "./node";
 
 const debug = debug_("readium-desktop:main:iroh:gossip");
@@ -143,11 +143,15 @@ class GossipManager {
 
             const topic = hashToTopic(hash);
 
-            // Subscribe with an empty bootstrap list — IROH will connect to any
-            // peer it discovers through its own mechanisms.
+            // Bootstrap with every peer the IROH node already knows about
+            // (mDNS on LAN, relay on internet). This lets the seeder join any
+            // existing gossip swarm for this topic immediately.
+            const bootstrapIds = await this._knownPeerIds(node);
+            debug("announceBlob bootstrap peers:", bootstrapIds.length);
+
             const sender = await node.gossip.subscribe(
                 topic,
-                [],
+                bootstrapIds,
                 (err: Error | null, msg: Message) => {
                     if (err) {
                         debug("gossip error (announce) for", hash, err);
@@ -180,7 +184,7 @@ class GossipManager {
     async discoverPeers(
         hash: string,
         bootstrapIds: string[] = [],
-        timeoutMs = 8_000,
+        timeoutMs = 20_000,
     ): Promise<Array<{ nodeId: string; relayUrl?: string | null }>> {
 
         if (!irohNodeManager.isRunning()) {
@@ -191,7 +195,17 @@ class GossipManager {
         const node = irohNodeManager.getInstance();
         if (!node) return [];
 
-        debug("discovering peers for", hash, "bootstrap:", bootstrapIds);
+        // Merge explicit bootstrap IDs (e.g. from original ticket, may be offline)
+        // with every peer the IROH node already knows (mDNS/relay discovery).
+        // This is the key to finding M2 when the original seeder (M0) is gone:
+        // M2 appears in remoteInfoList via mDNS on the same LAN, and becomes
+        // the bootstrap bridge into the gossip swarm for this hash.
+        const knownIds = await this._knownPeerIds(node);
+        const allBootstrap = [...new Set([...bootstrapIds, ...knownIds])];
+
+        debug("discovering peers for", hash,
+            "bootstrap:", allBootstrap.length,
+            "(", bootstrapIds.length, "explicit +", knownIds.length, "via mDNS/relay)");
 
         const collected: Array<{ nodeId: string; relayUrl?: string | null }> = [];
         let resolveWait!: () => void;
@@ -205,7 +219,7 @@ class GossipManager {
 
             sender = await node.gossip.subscribe(
                 topic,
-                bootstrapIds,
+                allBootstrap,
                 (err: Error | null, msg: Message) => {
                     if (err) {
                         debug("gossip error (discover) for", hash, err);
@@ -270,6 +284,30 @@ class GossipManager {
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
+
+    /**
+     * Returns nodeId strings for every peer already known to the IROH node
+     * (discovered via mDNS on local network, or via relay on internet).
+     *
+     * These are used to bootstrap gossip subscriptions so that even when the
+     * original ticket's seeder is offline, we can still join a swarm through
+     * any other reachable peer that may be subscribed to the same topic.
+     */
+    private async _knownPeerIds(node: NonNullable<ReturnType<typeof irohNodeManager.getInstance>>): Promise<string[]> {
+        try {
+            const infos = await node.net.remoteInfoList();
+            const ids: string[] = [];
+            for (const info of infos) {
+                try {
+                    ids.push(PublicKey.fromBytes(info.nodeId).toString());
+                } catch { /* skip malformed entry */ }
+            }
+            debug("known peers from remoteInfoList:", ids.length);
+            return ids;
+        } catch {
+            return [];
+        }
+    }
 
     /**
      * Message handler for *seeding* subscriptions (HAVE mode).
