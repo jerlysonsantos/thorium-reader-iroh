@@ -326,11 +326,32 @@ class GossipManager {
         const sub = this.subs.get(hash);
         if (!sub) return;
 
-        // New direct neighbor joined — re-announce so it learns about us immediately.
+        // Successfully joined the swarm — the actual QUIC connection is now live.
+        // The WANT sent by discoverPeers just before reconnect may have gone into
+        // the void (sent before the connection existed), so re-send it now.
+        if (msg.joined && msg.joined.length > 0) {
+            debug("joined swarm for", hash.slice(0, 12), "peers:", msg.joined.length);
+            sub.sender.broadcast(sub.haveMsg).catch((e) =>
+                debug("HAVE on join failed:", e));
+            if (sub.haveListeners.length > 0) {
+                const wantMsg = encodeMsg({ v: PROTO_VERSION, type: "WANT", hash });
+                debug("re-sending WANT on join (", sub.haveListeners.length, "listener(s) pending)");
+                sub.sender.broadcast(wantMsg).catch((e) =>
+                    debug("WANT re-send on join failed:", e));
+            }
+        }
+
+        // New direct neighbor — re-announce HAVE and re-send pending WANT.
         if (msg.neighborUp) {
-            debug("neighborUp for", hash, "—", msg.neighborUp, "— re-broadcasting HAVE");
+            debug("neighborUp for", hash.slice(0, 12), "—", msg.neighborUp!.slice(0, 12), "— re-broadcasting HAVE");
             sub.sender.broadcast(sub.haveMsg).catch((e) =>
                 debug("re-broadcast HAVE failed for", hash, e));
+            if (sub.haveListeners.length > 0) {
+                const wantMsg = encodeMsg({ v: PROTO_VERSION, type: "WANT", hash });
+                debug("re-sending WANT on neighborUp (", sub.haveListeners.length, "listener(s) pending)");
+                sub.sender.broadcast(wantMsg).catch((e) =>
+                    debug("WANT re-send on neighborUp failed:", e));
+            }
         }
 
         if (!msg.received?.content) return;
