@@ -17,10 +17,6 @@ const debug = debug_("readium-desktop:main:iroh:gossip");
 
 const PROTO_VERSION = 1 as const;
 
-/**
- * Broadcast by a node that holds (seeds) the blob.
- * Sent on join and re-sent whenever a new direct neighbor appears.
- */
 interface HavePayload {
     v: typeof PROTO_VERSION;
     type: "HAVE";
@@ -29,10 +25,6 @@ interface HavePayload {
     relayUrl?: string | null;
 }
 
-/**
- * Broadcast by a node that is looking for the blob.
- * All peers that hold it will reply with HAVE.
- */
 interface WantPayload {
     v: typeof PROTO_VERSION;
     type: "WANT";
@@ -45,7 +37,6 @@ type GossipPayload = HavePayload | WantPayload;
 // Wire helpers
 // ---------------------------------------------------------------------------
 
-/** Hash string (base32 / hex) → 32-byte gossip topic `Array<number>`. */
 function hashToTopic(hash: string): Array<number> {
     return Hash.fromString(hash).toBytes();
 }
@@ -70,36 +61,53 @@ function decodeMsg(content: Array<number>): GossipPayload | null {
 // GossipManager
 // ---------------------------------------------------------------------------
 
+export interface DiscoveredPeer {
+    nodeId: string;
+    relayUrl?: string | null;
+}
+
 interface ActiveSub {
     sender: Sender;
-    /** Serialised HAVE for this node+hash — re-broadcast when neighbors join. */
+    /** Pre-encoded HAVE for this node+hash. Re-broadcast on neighborUp and WANT. */
     haveMsg: Array<number>;
+    /** Our own nodeId — used to filter echoes of our own HAVE from the swarm. */
+    myNodeId: string;
+    /**
+     * One-shot resolvers registered by `discoverPeers` calls.
+     * When a HAVE arrives from another peer, the first resolver is popped and called.
+     * This lets `discoverPeers` reuse the existing swarm connection instead of
+     * opening an isolated new subscription.
+     */
+    haveListeners: Array<(peer: DiscoveredPeer) => void>;
+    /**
+     * Peers seen in HAVE messages while the swarm was alive.
+     * Keyed by nodeId → relayUrl (may be null).
+     *
+     * When the original bootstrap peer (e.g. Cargo) goes offline, HyParView may
+     * leave M1 and M2 with empty active views.  Storing peers seen *during*
+     * the active period lets us force a direct reconnect using their nodeId +
+     * relayUrl — bypassing the dead bootstrap node entirely.
+     */
+    seenPeers: Map<string, string | null>;
+    /** Prevents concurrent reconnect attempts. */
+    reconnecting: boolean;
 }
 
 /**
- * Manages long-lived gossip subscriptions for every blob that this node seeds.
+ * Manages long-lived gossip subscriptions for every blob this node seeds.
  *
- * Topology:
- *   - When A seeds a blob it calls `announceBlob(hash)`.
- *     GossipManager opens a gossip subscription on the blob's topic and broadcasts HAVE.
- *   - When C wants to find peers for a hash it calls `discoverPeers(hash, bootstrap)`.
- *     It joins the same topic, broadcasts WANT, and collects HAVE replies.
- *   - The "bootstrap" list is the set of nodeIds C already knows about (e.g. from
- *     a previously cached ticket). If the list is empty IROH falls back to its
- *     own discovery layer; C will still join the topic once any peer is reachable.
+ * Each blob gets exactly ONE gossip subscription that handles both roles:
  *
- * Resilience:
- *   - If A goes offline, B (which downloaded from A) keeps its subscription open
- *     and re-broadcasts HAVE to new neighbors. C can therefore discover B even
- *     though it only knew A's nodeId.
+ *   Seeder role  — on neighborUp and on WANT → broadcast HAVE
+ *   Discoverer   — on HAVE from remote peer  → notify pending discoverPeers callers
+ *
+ * Having a single subscription per hash is the critical design choice:
+ * when M1 has already joined M2's gossip swarm (via the original seeder as
+ * bootstrap while it was online), a new `discoverPeers` call must reuse that
+ * live swarm connection rather than opening an isolated second subscription.
  */
 class GossipManager {
 
-    /**
-     * Active seeding subscriptions, keyed by blob hash string.
-     * Kept open for the lifetime of the app so that any late-joining peer
-     * can discover us.
-     */
     private readonly subs = new Map<string, ActiveSub>();
 
     // -----------------------------------------------------------------------
@@ -107,21 +115,24 @@ class GossipManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Announce to the gossip swarm that *this* node holds `hash`.
+     * Announce to the gossip swarm that this node holds `hash`.
      *
-     * - Opens a subscription on the blob topic (no-op if one exists).
-     * - Broadcasts HAVE immediately.
-     * - Re-broadcasts HAVE whenever a new direct neighbor appears.
+     * Opens a subscription on the blob's topic (no-op if one already exists),
+     * then broadcasts HAVE.  Re-broadcasts HAVE whenever a new direct neighbor
+     * joins the swarm so late peers learn about us without a full WANT cycle.
      *
-     * No-op when the persistent IROH node is not running.
+     * @param explicitBootstrap  Extra nodeIds (e.g. the original seeder) to
+     *   bootstrap with in addition to what the persistent node already knows.
+     *   Passing the seeder's nodeId while the seeder is still online ensures
+     *   both this node and any previous downloader end up in the same swarm,
+     *   so the swarm survives after the seeder goes offline.
      */
-    async announceBlob(hash: string): Promise<void> {
+    async announceBlob(hash: string, explicitBootstrap: string[] = []): Promise<void> {
         if (!irohNodeManager.isRunning()) {
             debug("IROH node not running — skipping gossip announce for", hash);
             return;
         }
 
-        // Idempotent: already seeding this blob.
         if (this.subs.has(hash)) {
             debug("already announcing blob", hash, "— skipping");
             return;
@@ -143,27 +154,32 @@ class GossipManager {
 
             const topic = hashToTopic(hash);
 
-            // Bootstrap with every peer the IROH node already knows about
-            // (mDNS on LAN, relay on internet). This lets the seeder join any
-            // existing gossip swarm for this topic immediately.
-            const bootstrapIds = await this._knownPeerIds(node);
-            debug("announceBlob bootstrap peers:", bootstrapIds.length);
+            const discoveredIds = await this._knownPeerIds(node);
+            const allBootstrap = [...new Set([...explicitBootstrap, ...discoveredIds])];
+            debug("announceBlob bootstrap:", allBootstrap.length,
+                "(", explicitBootstrap.length, "explicit +", discoveredIds.length, "discovered)");
+
+            const sub: ActiveSub = {
+                sender: null as unknown as Sender, // filled below
+                haveMsg,
+                myNodeId: myAddr.nodeId,
+                haveListeners: [],
+                seenPeers: new Map(),
+                reconnecting: false,
+            };
 
             const sender = await node.gossip.subscribe(
                 topic,
-                bootstrapIds,
+                allBootstrap,
                 (err: Error | null, msg: Message) => {
-                    if (err) {
-                        debug("gossip error (announce) for", hash, err);
-                        return;
-                    }
-                    this._onSeedMessage(msg, hash, haveMsg);
+                    if (err) { debug("gossip error for", hash, err); return; }
+                    this._onMessage(msg, hash);
                 },
             );
 
-            this.subs.set(hash, { sender, haveMsg });
+            sub.sender = sender;
+            this.subs.set(hash, sub);
 
-            // Announce ourselves to whoever is already on the topic.
             await sender.broadcast(haveMsg);
             debug("HAVE announced for", hash, "nodeId:", myAddr.nodeId);
 
@@ -173,19 +189,25 @@ class GossipManager {
     }
 
     /**
-     * Join the gossip topic for `hash`, broadcast a WANT, and collect HAVE
-     * responses from peers that hold the blob.
+     * Find peers that hold `hash` via the gossip swarm.
      *
-     * @param hash         Blob hash to look up.
-     * @param bootstrapIds NodeIds to use as gossip bootstrap (may be empty).
-     * @param timeoutMs    Maximum time to wait for replies (default 8 s).
-     * @returns            List of discovered peers (may be empty on timeout).
+     * Fast path — existing swarm connection:
+     *   If `announceBlob` was already called for this hash, this node is already
+     *   in the gossip swarm.  We broadcast WANT on that live connection and wait
+     *   for a HAVE reply from any swarm member (e.g. M2).  This is the common
+     *   case after M1 downloaded from the original seeder and then re-attempts
+     *   the download after the seeder went offline.
+     *
+     * Slow path — new subscription:
+     *   If there is no active subscription (e.g. M3 has never seen this blob),
+     *   we open a new subscription bootstrapped via the known nodeIds and wait
+     *   for HAVE.  This requires at least one bootstrap node to be reachable.
      */
     async discoverPeers(
         hash: string,
         bootstrapIds: string[] = [],
         timeoutMs = 20_000,
-    ): Promise<Array<{ nodeId: string; relayUrl?: string | null }>> {
+    ): Promise<DiscoveredPeer[]> {
 
         if (!irohNodeManager.isRunning()) {
             debug("IROH node not running — skipping gossip discover for", hash);
@@ -195,19 +217,36 @@ class GossipManager {
         const node = irohNodeManager.getInstance();
         if (!node) return [];
 
-        // Merge explicit bootstrap IDs (e.g. from original ticket, may be offline)
-        // with every peer the IROH node already knows (mDNS/relay discovery).
-        // This is the key to finding M2 when the original seeder (M0) is gone:
-        // M2 appears in remoteInfoList via mDNS on the same LAN, and becomes
-        // the bootstrap bridge into the gossip swarm for this hash.
+        const wantMsg = encodeMsg({ v: PROTO_VERSION, type: "WANT", hash });
+
+        // ── Fast path: reuse the live swarm connection ───────────────────────
+        const existingSub = this.subs.get(hash);
+        if (existingSub) {
+            debug("discoverPeers: reusing existing gossip sub for", hash);
+
+            let peer = await this._waitForHave(existingSub, wantMsg, timeoutMs);
+
+            // If no HAVE arrived, the swarm may have fragmented after the original
+            // bootstrap peer (e.g. Cargo) went offline.  Try to reconnect directly
+            // to peers we saw while the swarm was alive, then retry the WANT.
+            if (!peer && existingSub.seenPeers.size > 0 && !existingSub.reconnecting) {
+                debug("fast path timeout — reconnecting with", existingSub.seenPeers.size, "known peer(s)");
+                await this._reconnectSub(hash, existingSub);
+                peer = await this._waitForHave(existingSub, wantMsg, Math.min(timeoutMs, 10_000));
+            }
+
+            debug("discoverPeers (existing sub):", peer ? "found" : "no peer");
+            return peer ? [peer] : [];
+        }
+
+        // ── Slow path: open a new subscription ───────────────────────────────
         const knownIds = await this._knownPeerIds(node);
         const allBootstrap = [...new Set([...bootstrapIds, ...knownIds])];
 
-        debug("discovering peers for", hash,
-            "bootstrap:", allBootstrap.length,
+        debug("discoverPeers (new sub) bootstrap:", allBootstrap.length,
             "(", bootstrapIds.length, "explicit +", knownIds.length, "via mDNS/relay)");
 
-        const collected: Array<{ nodeId: string; relayUrl?: string | null }> = [];
+        const collected: DiscoveredPeer[] = [];
         let resolveWait!: () => void;
         const waitForPeer = new Promise<void>((r) => { resolveWait = r; });
         const timer = setTimeout(resolveWait, timeoutMs);
@@ -215,27 +254,24 @@ class GossipManager {
         let sender: Sender | null = null;
         try {
             const topic = hashToTopic(hash);
-            const wantMsg = encodeMsg({ v: PROTO_VERSION, type: "WANT", hash });
 
             sender = await node.gossip.subscribe(
                 topic,
                 allBootstrap,
                 (err: Error | null, msg: Message) => {
                     if (err) {
-                        debug("gossip error (discover) for", hash, err);
+                        debug("gossip error (new sub discover) for", hash, err);
                         clearTimeout(timer);
                         resolveWait();
                         return;
                     }
-
                     if (msg.joined && msg.joined.length > 0) {
-                        debug("joined gossip swarm for", hash, "initial peers:", msg.joined);
+                        debug("joined gossip swarm for", hash, "peers:", msg.joined);
                     }
-
                     if (msg.received?.content) {
                         const payload = decodeMsg(msg.received.content);
                         if (payload?.type === "HAVE" && payload.hash === hash) {
-                            debug("peer discovered via gossip:", payload.nodeId);
+                            debug("peer discovered via new sub:", payload.nodeId);
                             collected.push({ nodeId: payload.nodeId, relayUrl: payload.relayUrl });
                             clearTimeout(timer);
                             resolveWait();
@@ -244,15 +280,12 @@ class GossipManager {
                 },
             );
 
-            // Broadcast WANT so that all nodes on the topic know we're looking.
             await sender.broadcast(wantMsg);
-            debug("WANT broadcast for", hash);
-
-            // Wait until we get at least one HAVE or the timeout fires.
+            debug("WANT broadcast (new sub) for", hash);
             await waitForPeer;
 
         } catch (e) {
-            debug("discoverPeers failed for", hash, e);
+            debug("discoverPeers (new sub) failed for", hash, e);
         } finally {
             clearTimeout(timer);
             if (sender) {
@@ -260,14 +293,11 @@ class GossipManager {
             }
         }
 
-        debug("discover finished for", hash, "found", collected.length, "peer(s)");
+        debug("discoverPeers (new sub) finished for", hash, "—", collected.length, "peer(s)");
         return collected;
     }
 
-    /**
-     * Close all active seeding subscriptions.
-     * Must be called before `irohNodeManager.stop()` during app shutdown.
-     */
+    /** Stop all subscriptions before the IROH node shuts down. */
     async stopAll(): Promise<void> {
         const entries = Array.from(this.subs.entries());
         this.subs.clear();
@@ -282,57 +312,143 @@ class GossipManager {
     }
 
     // -----------------------------------------------------------------------
-    // Private helpers
+    // Private
     // -----------------------------------------------------------------------
 
     /**
-     * Returns nodeId strings for every peer already known to the IROH node
-     * (discovered via mDNS on local network, or via relay on internet).
+     * Unified message handler for all subscriptions.
      *
-     * These are used to bootstrap gossip subscriptions so that even when the
-     * original ticket's seeder is offline, we can still join a swarm through
-     * any other reachable peer that may be subscribed to the same topic.
+     * Each subscription handles both roles simultaneously:
+     *   - Seeder:     neighborUp / received WANT  → broadcast HAVE
+     *   - Discoverer: received HAVE from remote    → pop and call haveListeners
      */
-    private async _knownPeerIds(node: NonNullable<ReturnType<typeof irohNodeManager.getInstance>>): Promise<string[]> {
+    private _onMessage(msg: Message, hash: string): void {
+        const sub = this.subs.get(hash);
+        if (!sub) return;
+
+        // New direct neighbor joined — re-announce so it learns about us immediately.
+        if (msg.neighborUp) {
+            debug("neighborUp for", hash, "—", msg.neighborUp, "— re-broadcasting HAVE");
+            sub.sender.broadcast(sub.haveMsg).catch((e) =>
+                debug("re-broadcast HAVE failed for", hash, e));
+        }
+
+        if (!msg.received?.content) return;
+        const payload = decodeMsg(msg.received.content);
+        if (!payload || payload.hash !== hash) return;
+
+        if (payload.type === "WANT") {
+            // Someone is looking for this blob — reply with our address.
+            debug("received WANT for", hash, "from", msg.received.deliveredFrom, "— replying HAVE");
+            sub.sender.broadcast(sub.haveMsg).catch((e) =>
+                debug("WANT→HAVE reply failed for", hash, e));
+        }
+
+        if (payload.type === "HAVE" && payload.nodeId !== sub.myNodeId) {
+            // Record peer for future reconnect bootstrap.
+            sub.seenPeers.set(payload.nodeId, payload.relayUrl ?? null);
+
+            // Notify the first pending discoverPeers caller (if any).
+            const listener = sub.haveListeners.shift();
+            if (listener) {
+                debug("received HAVE for", hash, "from", payload.nodeId, "— notifying listener");
+                listener({ nodeId: payload.nodeId, relayUrl: payload.relayUrl });
+            }
+        }
+    }
+
+    /**
+     * Wait for the next HAVE on `sub` by broadcasting `wantMsg` and resolving
+     * on the first reply or on timeout.
+     */
+    private _waitForHave(
+        sub: ActiveSub,
+        wantMsg: Array<number>,
+        timeoutMs: number,
+    ): Promise<DiscoveredPeer | null> {
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), timeoutMs);
+            sub.haveListeners.push((p) => {
+                clearTimeout(timer);
+                resolve(p);
+            });
+            sub.sender.broadcast(wantMsg).catch((e) =>
+                debug("WANT broadcast failed:", e));
+        });
+    }
+
+    /**
+     * Close the current sender and re-open the gossip subscription using
+     * peers seen during the active swarm period as bootstrap.
+     *
+     * Called when the fast-path WANT times out, indicating the gossip layer
+     * lost connectivity (e.g. the shared bootstrap peer went offline and
+     * HyParView did not auto-heal the M1↔M2 link in time).
+     */
+    private async _reconnectSub(hash: string, sub: ActiveSub): Promise<void> {
+        if (sub.reconnecting) return;
+        sub.reconnecting = true;
+
+        const node = irohNodeManager.getInstance();
+        if (!node) { sub.reconnecting = false; return; }
+
+        try {
+            // Register previously-seen peers in IROH's address book so they
+            // are reachable via relay even without a direct IP path.
+            for (const [nodeId, relayUrl] of sub.seenPeers) {
+                await node.net.addNodeAddr({
+                    nodeId,
+                    relayUrl: relayUrl ?? undefined,
+                    addresses: [],
+                }).catch(() => { /* best-effort */ });
+            }
+
+            const seenIds = Array.from(sub.seenPeers.keys());
+            const knownIds = await this._knownPeerIds(node);
+            const allBootstrap = [...new Set([...seenIds, ...knownIds])];
+
+            debug("_reconnectSub for", hash.slice(0, 12),
+                "bootstrap:", allBootstrap.length,
+                "(", seenIds.length, "seen +", knownIds.length, "known)");
+
+            // Close old sender gracefully before replacing it.
+            try { await sub.sender.close(); } catch { /* ignore */ }
+
+            const topic = hashToTopic(hash);
+            const newSender = await node.gossip.subscribe(
+                topic,
+                allBootstrap,
+                (err: Error | null, msg: Message) => {
+                    if (err) { debug("gossip error after reconnect:", err); return; }
+                    this._onMessage(msg, hash);
+                },
+            );
+
+            sub.sender = newSender;
+            // Re-announce ourselves so the reconnected swarm knows we have the blob.
+            await newSender.broadcast(sub.haveMsg);
+            debug("gossip reconnected for", hash.slice(0, 12));
+        } catch (e) {
+            debug("_reconnectSub failed for", hash.slice(0, 12), e);
+        } finally {
+            sub.reconnecting = false;
+        }
+    }
+
+    private async _knownPeerIds(
+        node: NonNullable<ReturnType<typeof irohNodeManager.getInstance>>,
+    ): Promise<string[]> {
         try {
             const infos = await node.net.remoteInfoList();
             const ids: string[] = [];
             for (const info of infos) {
-                try {
-                    ids.push(PublicKey.fromBytes(info.nodeId).toString());
-                } catch { /* skip malformed entry */ }
+                try { ids.push(PublicKey.fromBytes(info.nodeId).toString()); }
+                catch { /* skip */ }
             }
             debug("known peers from remoteInfoList:", ids.length);
             return ids;
         } catch {
             return [];
-        }
-    }
-
-    /**
-     * Message handler for *seeding* subscriptions (HAVE mode).
-     *
-     * - `neighborUp`: a new direct neighbor joined → re-broadcast HAVE so it
-     *   learns about us even if it missed the earlier broadcast.
-     * - `received WANT`: a peer is looking for this blob → reply with HAVE.
-     */
-    private _onSeedMessage(msg: Message, hash: string, haveMsg: Array<number>): void {
-        const sub = this.subs.get(hash);
-        if (!sub) return;
-
-        if (msg.neighborUp) {
-            debug("new neighbor for blob", hash, "—", msg.neighborUp, "— re-broadcasting HAVE");
-            sub.sender.broadcast(haveMsg).catch((e) =>
-                debug("re-broadcast HAVE failed for", hash, e));
-        }
-
-        if (msg.received?.content) {
-            const payload = decodeMsg(msg.received.content);
-            if (payload?.type === "WANT" && payload.hash === hash) {
-                debug("received WANT for", hash, "from", msg.received.deliveredFrom, "— replying HAVE");
-                sub.sender.broadcast(haveMsg).catch((e) =>
-                    debug("WANT→HAVE reply failed for", hash, e));
-            }
         }
     }
 }

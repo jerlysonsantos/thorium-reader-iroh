@@ -13,6 +13,7 @@ import { nanoid } from "nanoid";
 
 import { Iroh, BlobTicket, BlobDownloadOptions, SetTagOption, DownloadProgress, NodeAddr, BlobFormat } from "@number0/iroh";
 import { gossipManager } from "./gossip";
+import { irohNodeManager } from "./node";
 
 const debug = debug_("readium-desktop:main:iroh:download");
 
@@ -257,9 +258,21 @@ export async function downloadBlobFromTicket(
 
     debug("blob saved to", downloadPath);
 
-    // Announce via gossip that we now hold this blob, so we become a fallback
-    // peer for future downloaders even after the original seeder goes offline.
-    gossipManager.announceBlob(ticket.hash).catch((e) =>
+    // -----------------------------------------------------------------------
+    // Register the seeder in the persistent node's address book so future
+    // gossip subscriptions can reach it via relay.
+    // Then announce ourselves on the same gossip topic, passing the seeder's
+    // nodeId as explicit bootstrap — this puts us in the same swarm as the
+    // seeder (while it is still online), so when the seeder goes offline our
+    // direct gossip link with any other peer in that swarm survives.
+    // -----------------------------------------------------------------------
+    const persistNode = irohNodeManager.getInstance();
+    if (persistNode) {
+        persistNode.net.addNodeAddr(ticket.nodeAddr).catch((e) =>
+            debug("addNodeAddr to persistent node failed:", e));
+    }
+
+    gossipManager.announceBlob(ticket.hash, [ticket.nodeAddr.nodeId]).catch((e) =>
         debug("post-download gossip announce failed:", e));
 
     return downloadPath;
