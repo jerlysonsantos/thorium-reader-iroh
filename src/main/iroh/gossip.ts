@@ -222,21 +222,51 @@ class GossipManager {
         // ── Fast path: reuse the live swarm connection ───────────────────────
         const existingSub = this.subs.get(hash);
         if (existingSub) {
-            debug("discoverPeers: reusing existing gossip sub for", hash);
+            debug("discoverPeers: reusing existing gossip sub for", hash.slice(0, 12));
 
-            let peer = await this._waitForHave(existingSub, wantMsg, timeoutMs);
+            // Try gossip WANT/HAVE with a short deadline — this works when the
+            // swarm is still fully connected (e.g. Cargo is still alive and M1/M2
+            // are direct neighbours).
+            const gossipDeadlineMs = Math.min(timeoutMs, 5_000);
+            const peer = await this._waitForHave(existingSub, wantMsg, gossipDeadlineMs);
 
-            // If no HAVE arrived, the swarm may have fragmented after the original
-            // bootstrap peer (e.g. Cargo) went offline.  Try to reconnect directly
-            // to peers we saw while the swarm was alive, then retry the WANT.
-            if (!peer && existingSub.seenPeers.size > 0 && !existingSub.reconnecting) {
-                debug("fast path timeout — reconnecting with", existingSub.seenPeers.size, "known peer(s)");
-                await this._reconnectSub(hash, existingSub);
-                peer = await this._waitForHave(existingSub, wantMsg, Math.min(timeoutMs, 10_000));
+            if (peer) {
+                debug("discoverPeers: found via gossip HAVE");
+                return [peer];
             }
 
-            debug("discoverPeers (existing sub):", peer ? "found" : "no peer");
-            return peer ? [peer] : [];
+            // Gossip timed out — the swarm may have fragmented (original bootstrap
+            // peer went offline).  We already know who has the blob from the HAVE
+            // messages received while the swarm was alive (seenPeers).  Return them
+            // directly: the downloader will try each via IROH blob download (which
+            // uses IROH's relay for NAT traversal), skipping any that are offline.
+            if (existingSub.seenPeers.size > 0) {
+                const fallback: DiscoveredPeer[] = Array.from(existingSub.seenPeers.entries())
+                    .map(([nodeId, relayUrl]) => ({ nodeId, relayUrl }));
+                debug("discoverPeers: gossip timeout — returning", fallback.length,
+                    "seenPeer(s) as direct fallback");
+
+                // Reconnect in background so future discoverPeers calls benefit
+                // from a live swarm connection.
+                if (!existingSub.reconnecting) {
+                    this._reconnectSub(hash, existingSub).catch((e) =>
+                        debug("background reconnect failed:", e));
+                }
+
+                return fallback;
+            }
+
+            // No seenPeers either — try reconnecting and wait once more.
+            if (!existingSub.reconnecting) {
+                debug("discoverPeers: no seenPeers — attempting reconnect");
+                await this._reconnectSub(hash, existingSub);
+                const retryPeer = await this._waitForHave(
+                    existingSub, wantMsg, Math.min(timeoutMs, 10_000));
+                if (retryPeer) return [retryPeer];
+            }
+
+            debug("discoverPeers (existing sub): no peer found");
+            return [];
         }
 
         // ── Slow path: open a new subscription ───────────────────────────────
