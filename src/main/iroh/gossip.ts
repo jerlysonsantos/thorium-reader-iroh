@@ -6,10 +6,30 @@
 // ==LICENSE-END==
 
 import debug_ from "debug";
+import * as crypto from "crypto";
 import { Hash, Message, PublicKey, Sender } from "@number0/iroh";
 import { irohNodeManager } from "./node";
 
 const debug = debug_("readium-desktop:main:iroh:gossip");
+
+// ---------------------------------------------------------------------------
+// Fixed registry topic
+// ---------------------------------------------------------------------------
+
+/**
+ * All Thorium nodes subscribe to this single shared topic on startup,
+ * regardless of which files they hold.
+ *
+ * This is the "rendezvous point": any always-on Thorium node (even one with
+ * no files) can act as bootstrap for the entire network once it is in the
+ * registry swarm.
+ *
+ * Topic = SHA-256("thorium-iroh-registry-v1") — identical derivation in the
+ * Rust Cargo binary so they interoperate on the same swarm.
+ */
+const REGISTRY_TOPIC: Array<number> = Array.from(
+    crypto.createHash("sha256").update("thorium-iroh-registry-v1").digest(),
+);
 
 // ---------------------------------------------------------------------------
 // Protocol v1
@@ -55,6 +75,19 @@ function decodeMsg(content: Array<number>): GossipPayload | null {
     } catch {
         return null;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Registry state
+// ---------------------------------------------------------------------------
+
+interface Registry {
+    sender: Sender;
+    myNodeId: string;
+    /** Pre-serialised HAVE messages keyed by hash — re-broadcast on neighborUp. */
+    seeds: Map<string, Array<number>>;
+    /** Pending discoverPeers listeners waiting for a HAVE for a specific hash. */
+    wantListeners: Map<string, Array<(peer: DiscoveredPeer) => void>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,10 +142,62 @@ interface ActiveSub {
 class GossipManager {
 
     private readonly subs = new Map<string, ActiveSub>();
+    private registry: Registry | null = null;
 
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------
+
+    /**
+     * Subscribe to the fixed registry topic.
+     *
+     * Call once from app.ts after `irohNodeManager.start()`.
+     *
+     * @param bootstrapIds  NodeIds of always-on peers to bootstrap with.
+     *   Typically the nodeId of the dedicated rendezvous machine (e.g. the
+     *   machine at 192.168.101.4 that runs Thorium persistently).  May also
+     *   include the original Cargo seeder's nodeId so the seeder can forward
+     *   the registry JOIN to other already-subscribed nodes.
+     */
+    async startRegistry(bootstrapIds: string[] = []): Promise<void> {
+        if (this.registry) return;
+        if (!irohNodeManager.isRunning()) return;
+
+        const node = irohNodeManager.getInstance();
+        if (!node) return;
+
+        try {
+            const myAddr = await node.net.nodeAddr();
+            const discovered = await this._knownPeerIds(node);
+            const allBootstrap = [...new Set([...bootstrapIds, ...discovered])];
+
+            debug("startRegistry bootstrap:", allBootstrap.length, "peer(s)");
+
+            const reg: Registry = {
+                sender: null as unknown as Sender,
+                myNodeId: myAddr.nodeId,
+                seeds: new Map(),
+                wantListeners: new Map(),
+            };
+
+            const sender = await node.gossip.subscribe(
+                REGISTRY_TOPIC,
+                allBootstrap,
+                (err: Error | null, msg: Message) => {
+                    if (err) { debug("registry gossip error:", err); return; }
+                    if (reg.sender) this._onRegistryMessage(msg, reg);
+                },
+            );
+
+            reg.sender = sender;
+            this.registry = reg;
+            debug("registry subscription active");
+        } catch (e) {
+            debug("startRegistry failed:", e);
+        }
+    }
+
+
 
     /**
      * Announce to the gossip swarm that this node holds `hash`.
@@ -181,10 +266,14 @@ class GossipManager {
             this.subs.set(hash, sub);
 
             await sender.broadcast(haveMsg);
-            debug("HAVE announced for", hash, "nodeId:", myAddr.nodeId);
+            debug("HAVE announced for", hash.slice(0, 12), "nodeId:", myAddr.nodeId);
+
+            // Also announce on the shared registry so any node in the registry
+            // swarm can discover this blob without needing the per-file topic.
+            this._registryAnnounce(hash, haveMsg);
 
         } catch (e) {
-            debug("announceBlob failed for", hash, e);
+            debug("announceBlob failed for", hash.slice(0, 12), e);
         }
     }
 
@@ -256,7 +345,14 @@ class GossipManager {
                 return fallback;
             }
 
-            // No seenPeers either — try reconnecting and wait once more.
+            // No seenPeers either — try registry before reconnecting.
+            const regPeer = await this._registryDiscover(hash, Math.min(timeoutMs, 8_000));
+            if (regPeer) {
+                debug("discoverPeers: found via registry (no seenPeers path)");
+                return [regPeer];
+            }
+
+            // Last resort: reconnect per-file swarm and retry.
             if (!existingSub.reconnecting) {
                 debug("discoverPeers: no seenPeers — attempting reconnect");
                 await this._reconnectSub(hash, existingSub);
@@ -323,7 +419,16 @@ class GossipManager {
             }
         }
 
-        debug("discoverPeers (new sub) finished for", hash, "—", collected.length, "peer(s)");
+        // If per-file gossip found nobody, try the registry before giving up.
+        if (collected.length === 0) {
+            const regPeer = await this._registryDiscover(hash, Math.min(timeoutMs, 8_000));
+            if (regPeer) {
+                debug("discoverPeers (new sub): found via registry");
+                return [regPeer];
+            }
+        }
+
+        debug("discoverPeers (new sub) finished for", hash.slice(0, 12), "—", collected.length, "peer(s)");
         return collected;
     }
 
@@ -334,10 +439,15 @@ class GossipManager {
         for (const [hash, sub] of entries) {
             try {
                 await sub.sender.close();
-                debug("closed gossip sub for", hash);
+                debug("closed gossip sub for", hash.slice(0, 12));
             } catch (e) {
-                debug("gossip close error for", hash, e);
+                debug("gossip close error for", hash.slice(0, 12), e);
             }
+        }
+        if (this.registry) {
+            try { await this.registry.sender.close(); debug("closed registry sub"); }
+            catch (e) { debug("registry close error:", e); }
+            this.registry = null;
         }
     }
 
@@ -483,6 +593,99 @@ class GossipManager {
             debug("_reconnectSub failed for", hash.slice(0, 12), e);
         } finally {
             sub.reconnecting = false;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Registry helpers
+    // -----------------------------------------------------------------------
+
+    /** Store HAVE in registry.seeds and broadcast it to all registry members. */
+    private _registryAnnounce(hash: string, haveMsg: Array<number>): void {
+        if (!this.registry) return;
+        this.registry.seeds.set(hash, haveMsg);
+        this.registry.sender.broadcast(haveMsg).catch((e) =>
+            debug("registry HAVE broadcast failed:", e));
+        debug("HAVE sent on registry for", hash.slice(0, 12));
+    }
+
+    /**
+     * Broadcast WANT on the registry topic and wait for the first HAVE reply.
+     * Returns null on timeout.
+     */
+    private _registryDiscover(hash: string, timeoutMs: number): Promise<DiscoveredPeer | null> {
+        if (!this.registry) return Promise.resolve(null);
+        const reg = this.registry;
+
+        return new Promise((resolve) => {
+            const timer = setTimeout(() => {
+                // Clean up listener on timeout
+                const list = reg.wantListeners.get(hash);
+                if (list) {
+                    const i = list.indexOf(onHave);
+                    if (i >= 0) list.splice(i, 1);
+                    if (list.length === 0) reg.wantListeners.delete(hash);
+                }
+                resolve(null);
+            }, timeoutMs);
+
+            const onHave = (peer: DiscoveredPeer) => {
+                clearTimeout(timer);
+                resolve(peer);
+            };
+
+            const list = reg.wantListeners.get(hash) ?? [];
+            list.push(onHave);
+            reg.wantListeners.set(hash, list);
+
+            const wantMsg = encodeMsg({ v: PROTO_VERSION, type: "WANT", hash });
+            reg.sender.broadcast(wantMsg).catch((e) =>
+                debug("registry WANT broadcast failed:", e));
+            debug("WANT sent on registry for", hash.slice(0, 12));
+        });
+    }
+
+    /** Handle gossip messages arriving on the fixed registry topic. */
+    private _onRegistryMessage(msg: Message, reg: Registry): void {
+        // New neighbor on the registry → re-broadcast all HAVE announcements.
+        if (msg.neighborUp) {
+            debug("registry neighborUp:", msg.neighborUp!.slice(0, 12),
+                "— re-broadcasting", reg.seeds.size, "HAVE(s)");
+            for (const haveMsg of reg.seeds.values()) {
+                reg.sender.broadcast(haveMsg).catch((e) =>
+                    debug("registry HAVE re-broadcast failed:", e));
+            }
+        }
+
+        // Also re-broadcast on joined (connection just established).
+        if (msg.joined && msg.joined.length > 0) {
+            debug("registry joined with", msg.joined.length, "peer(s) — re-broadcasting HAVEs");
+            for (const haveMsg of reg.seeds.values()) {
+                reg.sender.broadcast(haveMsg).catch((e) =>
+                    debug("registry HAVE on join failed:", e));
+            }
+        }
+
+        const payload = msg.received?.content ? decodeMsg(msg.received.content) : null;
+        if (!payload) return;
+
+        if (payload.type === "WANT") {
+            // Someone is looking for a blob — reply if we seed it.
+            const haveMsg = reg.seeds.get(payload.hash);
+            if (haveMsg) {
+                debug("registry WANT for", payload.hash.slice(0, 12), "— replying HAVE");
+                reg.sender.broadcast(haveMsg).catch((e) =>
+                    debug("registry WANT→HAVE failed:", e));
+            }
+        }
+
+        if (payload.type === "HAVE" && payload.nodeId !== reg.myNodeId) {
+            // A seeder announced itself — notify any pending discoverPeers call.
+            debug("registry HAVE received for", payload.hash.slice(0, 12),
+                "from", payload.nodeId.slice(0, 12));
+            const list = reg.wantListeners.get(payload.hash);
+            const listener = list?.shift();
+            if (listener) listener({ nodeId: payload.nodeId, relayUrl: payload.relayUrl });
         }
     }
 

@@ -173,6 +173,13 @@ export function* init() {
         return irohNodeManager.start(irohDataDir);
     });
 
+    // Join the fixed registry gossip topic so any Thorium node on the network
+    // can discover this node and its blobs without needing a specific file hash.
+    // Add known rendezvous node IDs here (e.g. the always-on machine at 192.168.101.4).
+    yield call(() => gossipManager.startRegistry([
+        '1ec9388c43c4173bf1073ff56d9f00cf7fde4b07dd591b2851c97b6c2d260886'
+    ]));
+
     yield call(() => {
         const deviceIdManager = diMainGet("device-id-manager");
         return deviceIdManager.absorbDBToJson();
