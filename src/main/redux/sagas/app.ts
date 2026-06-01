@@ -177,7 +177,7 @@ export function* init() {
     // can discover this node and its blobs without needing a specific file hash.
     // Add known rendezvous node IDs here (e.g. the always-on machine at 192.168.101.4).
     yield call(() => gossipManager.startRegistry([
-        '1ec9388c43c4173bf1073ff56d9f00cf7fde4b07dd591b2851c97b6c2d260886'
+        'acf9653e8ecd04b93985bab0b098c40a62c0a89e5ecf1b2c827cc494c6ec6edb'
     ]));
 
     yield call(() => {
